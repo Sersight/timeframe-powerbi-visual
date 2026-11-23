@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Timeframe – browser test harness</title>
+<!--
+    Functional and performance scenarios for the compiled visual (last `pbiviz package`),
+    run against a mock of the Power BI host. Mirrors the cases Microsoft lists in
+    "Test a Power BI custom visual before submitting it" that apply to a slicer.
+    Driven by run.mjs (headless Chrome); can also be opened in Chrome and run from the
+    console with `harness.run()`.
+-->
+<link rel="stylesheet" href="../../.tmp/drop/visual.css">
+<style>
+    body { margin: 0; padding: 12px; font: 13px "Segoe UI", sans-serif; background: #eee; }
+    .host { position: relative; overflow: hidden; display: inline-block; vertical-align: top; margin: 4px; background: #fff; }
+</style>
+<script>window.powerbi = {};</script>
+<script src="../../.tmp/drop/visual.js"></script>
+</head>
+<body>
+<div id="stage"></div>
+<script>
+"use strict";
+
+const GUID = "dateRangeSlicer73F86AD351A84B8DA2FFE007F105235A";
+const plugin = powerbi.visuals.plugins[GUID];
+// Enum values as inlined in the bundle (powerbi-visuals-api).
+const ViewMode = { View: 0, Edit: 1, InFocusEdit: 2 };
+const DialogAction = { OK: 1, Cancel: 2 };
+const PRESETS = ["today", "yesterday", "last7Days", "last30Days", "thisMonth", "lastMonth",
+    "thisQuarter", "lastQuarter", "yearToDate", "last12Months", "thisYear", "lastYear"];
+const LANGUAGES = ["auto", "pt-PT", "pt-BR", "en-GB", "en-US", "es-ES", "fr-FR", "de-DE", "it-IT", "zh-CN", "ja-JP"];
+
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const clone = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+const day = (y, m, d) => new Date(y, m - 1, d);
+const addDays = (date, n) => new Date(date.getFullYear(), date.getMonth(), date.getDate() + n);
+const monthStart = (date, offset) => new Date(date.getFullYear(), date.getMonth() + offset, 1);
+const monthEnd = (date, offset) => new Date(date.getFullYear(), date.getMonth() + offset + 1, 0);
+const dayKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+const today = () => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate()); };
+const colour = value => ({ solid: { color: value } });
+
+// ---------------------------------------------------------------------------
+// Recording: console errors/warnings and uncaught errors, attributed to the scenario
+// running at the time (the visual logs with console.error when update() fails).
+// ---------------------------------------------------------------------------
+const harness = { results: [], console: [], current: null };
+window.harness = harness;
+for (const level of ["error", "warn"]) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => {
+        harness.console.push({ scenario: harness.current, level, text: args.map(a => a instanceof Error ? a.stack : String(a)).join(" ").slice(0, 400) });
+        original(...args);
+    };
+}
+window.addEventListener("error", event => harness.console.push({ scenario: harness.current, level: "exception", text: String(event.message) }));
+window.addEventListener("unhandledrejection", event => harness.console.push({
+    scenario: harness.current, level: "rejection", text: String(event.reason?.message ?? JSON.stringify(event.reason)),
+}));
+
+function assert(condition, message) {
+    if (!condition) {
+        throw new Error(message);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One visual instance with a mock host. The host records everything the visual asks
+// of it and, like Power BI, echoes each applied filter back with a fresh update().
+// ---------------------------------------------------------------------------
+class Instance {
+    /**
+     * @param options width/height, locale, objects (format pane), values (date column),
+     * column ("dateTime" | "text" | "numeric" | "none"), dataViewsMode ("normal" |
+     * "undefined" | "empty" | "noCategorical"), viewMode, capabilities, highContrast,
+     * echo/echoDelay (filter round trip), dialog ({ mode: "ok" | "cancel" | "reject", code, result }).
+     */
+    constructor(options = {}) {
+        this.options = {
+            width: 300, height: 64, locale: "en-GB", objects: {}, values: [day(2024, 1, 1), day(2027, 12, 31)],
+            column: "dateTime", dataViewsMode: "normal", viewMode: ViewMode.Edit,
+            capabilities: { allowInteractions: true, allowModalDialog: true },
+            highContrast: false, echo: true, echoDelay: 25, dialog: { mode: "ok" }, jsonFilters: [],
+            ...options,
+        };
+        this.objects = clone(this.options.objects);
+        this.jsonFilters = clone(this.options.jsonFilters);
+        this.log = { filters: [], persisted: [], failed: [], started: 0, finished: 0, launched: [], contextMenus: 0, dialogs: [], updateMs: [] };
+        this.alive = true;
+
+        this.element = document.createElement("div");
+        this.element.className = "host";
+        this.element.style.width = `${this.options.width}px`;
+        this.element.style.height = `${this.options.height}px`;
+        document.getElementById("stage").append(this.element);
+
+        const self = this;
+        this.host = {
+            locale: this.options.locale,
+            eventService: {
+                renderingStarted() { self.log.started++; },
+                renderingFinished() { self.log.finished++; },
+                renderingFailed(_, error) { self.log.failed.push(String(error)); },
+            },
+            createSelectionManager: () => ({ showContextMenu() { self.log.contextMenus++; return Promise.resolve(); } }),
+            colorPalette: this.options.highContrast
+                ? { isHighContrast: true, foreground: { value: "#ffffff" }, background: { value: "#000000" }, foregroundSelected: { value: "#ffff00" } }
+                : { isHighContrast: false },
+            hostCapabilities: this.options.capabilities,
+            launchUrl: url => self.log.launched.push(url),
+            openModalDialog: (id, dialogOptions, state) => {
+                self.log.dialogs.push({ id, dialogOptions, state });
+                const dialog = self.options.dialog;
+                if (dialog.mode === "reject") {
+                    return Promise.reject({ error: dialog.code });
+                }
+                if (dialog.mode === "cancel") {
+                    return Promise.resolve({ actionId: DialogAction.Cancel, resultState: null });
+                }
+                return Promise.resolve({ actionId: DialogAction.OK, resultState: "result" in dialog ? dialog.result : { start: state.start, end: state.end } });
+            },
+            applyJsonFilter: (filter, objectName, propertyName, action) => {
+                self.log.filters.push({ filter: clone(filter), action });
+                // Power BI serialises the filter: Date values come back as ISO strings.
+                // The echo carries the filter that was applied, whatever the test did to
+                // jsonFilters in the meantime (e.g. a stale update with the old filter).
+                const echoed = filter ? [clone(filter)] : [];
+                self.jsonFilters = echoed;
+                if (self.options.echo) {
+                    setTimeout(() => {
+                        if (self.alive) {
+                            self.jsonFilters = echoed;
+                            self.update();
+                        }
+                    }, self.options.echoDelay);
+                }
+            },
+            persistProperties: changes => {
+                self.log.persisted.push(clone(changes));
+                for (const merge of changes.merge ?? []) {
+                    self.objects[merge.objectName] = { ...(self.objects[merge.objectName] || {}), ...merge.properties };
+                }
+            },
+        };
+        this.visual = plugin.create({ element: this.element, host: this.host });
+        this.update();
+    }
+
+    dataView() {
+        const { column } = this.options;
+        if (column === "none") {
+            return { metadata: { columns: [], objects: this.objects } };
+        }
+        const type = column === "dateTime" ? { dateTime: true } : column === "text" ? { text: true } : { numeric: true };
+        const source = { displayName: "Date", queryName: "Calendar.Date", type, expr: { source: { entity: "Calendar" }, ref: "Date" } };
+        return {
+            metadata: { columns: [source], objects: this.objects },
+            categorical: { categories: [{ source, values: this.options.values }] },
+        };
+    }
+
+    /**
+     * Calls the visual's update() with the current configuration.
+     * @param overrides Option changes to apply first (e.g. { column: "none" }).
+     * @returns Time spent inside update(), in ms.
+     */
+    update(overrides = {}) {
+        Object.assign(this.options, overrides);
+        const mode = this.options.dataViewsMode;
+        const dataViews = mode === "undefined" ? undefined : mode === "empty" ? [] : mode === "noCategorical" ? [{ metadata: { columns: [], objects: this.objects } }] : [this.dataView()];
+        const started = performance.now();
+        this.visual.update({
+            viewport: { width: this.options.width, height: this.options.height },
+            dataViews, jsonFilters: this.jsonFilters, viewMode: this.options.viewMode, type: 2, editMode: 0,
+        });
+        const ms = performance.now() - started;
+        this.log.updateMs.push(ms);
+        return ms;
+    }
+
+    resize(width, height) {
+        this.element.style.width = `${width}px`;
+        this.element.style.height = `${height}px`;
+        return this.update({ width, height });
+    }
+
+    setObjects(objects) {
+        this.objects = clone(objects);
+        return this.update();
+    }
+
+    q(selector) { return this.element.querySelector(selector); }
+    qa(selector) { return Array.from(this.element.querySelectorAll(selector)); }
+    dates() { return this.qa(".drs-stack-date").map(el => el.textContent); }
+    quick() { return this.q(".drs-quick"); }
+    isDefault() { return !!this.q(".drs-quick--default"); }
+
+    /** Current filter as inclusive day keys, or null when no filter is applied. */
+    range() {
+        const conditions = this.jsonFilters[0]?.conditions;
+        if (!conditions) {
+            return null;
+        }
+        const start = new Date(conditions[0].value);
+        const endExclusive = new Date(conditions[1].value);
+        return { start: dayKey(start), end: dayKey(addDays(endExclusive, -1)), startHours: start.getHours() };
+    }
+
+    click(selector) {
+        const target = this.q(selector);
+        assert(target, `missing element ${selector}`);
+        target.click();
+        return target;
+    }
+
+    key(target, key, init = {}) {
+        (typeof target === "string" ? this.q(target) : target).dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init }));
+    }
+
+    setDate(selector, value) {
+        const input = this.q(selector);
+        assert(input, `missing input ${selector}`);
+        input.value = value;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    async openMenu() {
+        this.quick().click();
+        await wait(60);
+        assert(this.q(".drs-menu"), "menu did not open");
+    }
+
+    async pick(kind) {
+        await this.openMenu();
+        const item = this.q(`[data-focus-key="menu-${kind}"]`);
+        assert(item, `menu has no entry for ${kind}`);
+        // On the drum the entry may sit on a peeking row: turn to it first.
+        const row = item.closest(".drs-drum-row");
+        if (row && !row.classList.contains("drs-drum-row--current")) {
+            row.click();
+            await wait(30);
+        }
+        item.click();
+        await wait(80);
+    }
+
+    destroy() {
+        this.alive = false;
+        this.element.remove();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scenarios
+// ---------------------------------------------------------------------------
+const scenarios = [];
+/**
+ * @param group Subset name (core, data, format, host, interact, perf, tz, motion).
+ * @param name Scenario name.
+ * @param fn Receives { make, assert, wait, report }; throws to fail.
+ * @param allow Console entries that are expected ({ level, text }).
+ */
+function scenario(group, name, fn, allow = []) {
+    scenarios.push({ group, name, fn, allow });
+}
+
+const expectRange = (instance, start, end, label = "") => {
+    const range = instance.range();
+    assert(range, `${label} no filter applied`);
+    assert(range.start === dayKey(start) && range.end === dayKey(end),
+        `${label} expected ${dayKey(start)}..${dayKey(end)}, got ${range.start}..${range.end}`);
+};
+
+// ---- core -----------------------------------------------------------------
+
+scenario("core", "landing without a field, picker once a date column is added, back again", async ({ make }) => {
+    const i = make({ column: "none" });
+    assert(i.q(".drs-landing"), "landing expected");
+    i.update({ column: "dateTime" });
+    assert(i.q(".drs-picker"), "picker expected");
+    i.update({ column: "none" });
+    assert(i.q(".drs-landing"), "landing expected after removing the field");
+    i.update({ column: "dateTime" });
+    assert(i.q(".drs-picker") && i.dates().length === 2, "picker with two rows expected");
+});
+
+scenario("core", "a text or numeric column shows a message instead of filtering", async ({ make }) => {
+    const i = make({ column: "text", objects: { period: { defaultPreset: "thisMonth" } } });
+    assert(i.q(".drs-message"), "message expected for a text column");
+    assert(i.log.filters.length === 0, "no filter must be applied on a non-date column");
+    i.update({ column: "numeric" });
+    assert(i.q(".drs-message"), "message expected for a numeric column");
+});
+
+scenario("core", "missing or empty data views", async ({ make }) => {
+    for (const mode of ["undefined", "empty", "noCategorical"]) {
+        const i = make({ dataViewsMode: mode });
+        assert(i.q(".drs-landing"), `landing expected with dataViews ${mode}`);
+    }
+});
+
+scenario("core", "the default preset is applied on the first update and persisted", async ({ make, wait }) => {
+    const i = make({ objects: { period: { defaultPreset: "last30Days" } } });
+    assert(i.log.filters.length === 1 && i.log.filters[0].action !== undefined, "one filter expected");
+    assert(i.log.persisted.some(p => p.merge?.[0]?.objectName === "selectionState"), "selection must be persisted");
+    await wait(80);
+    expectRange(i, addDays(today(), -29), today());
+    assert(i.isDefault(), "⚡ must show the default");
+    assert(i.q(".drs-quick--active"), "⚡ must show an active preset");
+});
+
+scenario("core", "a filter that is never echoed is dropped after the grace period", async ({ make, wait }) => {
+    const i = make({ echo: false, objects: { period: { defaultPreset: "thisMonth" } } });
+    assert(i.dates()[0] !== "—", "dates expected while pending");
+    await wait(3200);
+    i.jsonFilters = [];
+    i.update();
+    assert(i.q(".drs-stack-date--implicit"), "all dates (implicit rows) expected once the filter is gone");
+    assert(i.log.filters.length === 1, "the default must not be re-applied in a loop");
+});
+
+scenario("core", "junk filters from the host are ignored without errors", async ({ make }) => {
+    const i = make();
+    const junk = [
+        [{}], [null], ["x"], [{ conditions: "no" }], [{ conditions: [] }],
+        [{ conditions: [{ operator: "Foo", value: "bar" }] }],
+        [{ conditions: [{ operator: "GreaterThanOrEqual", value: "not a date" }, { operator: "LessThan", value: {} }] }],
+        [{ conditions: [{ operator: "GreaterThanOrEqual", value: "2026-13-45" }] }],
+        [{ conditions: [{ operator: "LessThan", value: 1234567890123 }] }],
+    ];
+    for (const filters of junk) {
+        i.jsonFilters = filters;
+        i.update();
+        assert(i.dates().length === 2, `rows expected with ${JSON.stringify(filters)}`);
+    }
+});
+
+scenario("core", "junk persisted state is ignored without errors", async ({ make }) => {
+    for (const state of ["not json", "{}", '{"kind":"zzz"}', 12345, "", null, '{"kind":"thisMonth","start":5}', '{"kind":"custom","start":"x","end":"y"}']) {
+        const i = make({ objects: { selectionState: { state } } });
+        assert(i.dates().length === 2, `rows expected with state ${JSON.stringify(state)}`);
+    }
+});
+
+scenario("core", "a bookmark filter wins over the persisted preset; a matching preset rolls", async ({ make }) => {
+    const t = today();
+    const custom = { start: day(t.getFullYear(), t.getMonth(), 10), end: day(t.getFullYear(), t.getMonth(), 20) };
+    const asFilter = r => [{ conditions: [{ operator: "GreaterThanOrEqual", value: r.start.toJSON() }, { operator: "LessThan", value: addDays(r.end, 1).toJSON() }] }];
+    const i = make({
+        objects: { period: { defaultPreset: "thisMonth" }, selectionState: { state: JSON.stringify({ kind: "thisMonth", start: dayKey(monthStart(t, 0)), end: dayKey(monthEnd(t, 0)) }) } },
+        jsonFilters: asFilter(custom),
+    });
+    expectRange(i, custom.start, custom.end, "bookmark");
+    assert(!i.q(".drs-quick--active"), "custom range: ⚡ must not be active");
+    assert(i.log.filters.length === 0, "the visual must not fight a bookmark");
+
+    const lastMonth = { start: monthStart(t, -1), end: monthEnd(t, -1) };
+    const j = make({
+        objects: { selectionState: { state: JSON.stringify({ kind: "lastMonth", start: dayKey(lastMonth.start), end: dayKey(lastMonth.end) }) } },
+        jsonFilters: asFilter(lastMonth),
+    });
+    assert(j.q(".drs-quick--active"), "matching preset must be recognised");
+    assert(j.log.filters.length === 0, "an up-to-date rolling preset must not be re-applied");
+});
+
+scenario("core", "a rolling preset saved two months ago is re-evaluated to today", async ({ make, wait }) => {
+    const t = today();
+    const stale = { start: monthStart(t, -3), end: monthEnd(t, -3) };
+    const i = make({
+        objects: { selectionState: { state: JSON.stringify({ kind: "lastMonth", start: dayKey(stale.start), end: dayKey(stale.end) }) } },
+        jsonFilters: [{ conditions: [{ operator: "GreaterThanOrEqual", value: stale.start.toJSON() }, { operator: "LessThan", value: addDays(stale.end, 1).toJSON() }] }],
+    });
+    await wait(80);
+    expectRange(i, monthStart(t, -1), monthEnd(t, -1), "rolled");
+    assert(i.log.filters.length === 1, "exactly one re-application expected");
+});
+
+scenario("core", "changing the default in the format pane applies it, 'none' clears", async ({ make, wait }) => {
+    const t = today();
+    const i = make({ objects: { period: { defaultPreset: "thisMonth" } } });
+    await wait(80);
+    i.setObjects({ period: { defaultPreset: "lastYear" } });
+    await wait(80);
+    expectRange(i, day(t.getFullYear() - 1, 1, 1), day(t.getFullYear() - 1, 12, 31), "lastYear");
+    i.setObjects({ period: { defaultPreset: "" } });
+    await wait(80);
+    assert(i.range() === null, "none must remove the filter");
+    assert(i.q(".drs-stack-date--implicit"), "implicit rows expected");
+});
+
+// ---- data -----------------------------------------------------------------
+
+scenario("data", "empty, single, double and malformed values", async ({ make }) => {
+    const sets = [[], [day(2026, 5, 5)], [day(2026, 5, 5), day(2026, 5, 6)],
+        [null, undefined, "abc", 123456789012, new Date(NaN), "2026-13-45", {}, true, -1, ""]];
+    for (const values of sets) {
+        const i = make({ values, objects: { period: { defaultPreset: "thisMonth" } } });
+        assert(i.dates().length === 2, "rows expected");
+        i.setObjects({});
+        assert(i.dates().length === 2, "rows expected under all dates");
+    }
+});
+
+scenario("data", "extreme dates in the column and in the filter", async ({ make }) => {
+    const i = make({ values: [day(1900, 1, 1), day(2200, 12, 31)] });
+    assert(i.q(".drs-stack-date--implicit"), "implicit rows expected");
+    i.jsonFilters = [{ conditions: [{ operator: "GreaterThanOrEqual", value: day(1, 1, 1).toJSON() }, { operator: "LessThan", value: day(9999, 12, 31).toJSON() }] }];
+    i.update();
+    assert(i.dates().length === 2, "rows expected with an extreme filter");
+    i.update({ objects: { layout: { mode: "panel" } }, width: 600, height: 400 });
+    i.setObjects({ layout: { mode: "panel" } });
+    assert(i.q(".drs-cal"), "calendar expected");
+});
+
+scenario("perf", "100k and 1M rows: update() cost", async ({ make, report }) => {
+    for (const count of [100000, 1000000]) {
+        const base = day(2000, 1, 1).getTime();
+        const values = Array.from({ length: count }, (_, k) => new Date(base + k * 86400000 / 4));
+        const i = make({ values });
+        const ms = i.update();
+        report(`${count} rows: ${ms.toFixed(1)} ms per update`);
+        assert(ms < 2000, `${count} rows took ${ms.toFixed(0)} ms`);
+        assert(i.q(".drs-stack-date--implicit"), "rows expected");
+    }
+});
+
+// ---- format ---------------------------------------------------------------
+
+scenario("format", "text size, corner radius, colours and fonts at their extremes", async ({ make }) => {
+    const i = make({ objects: { period: { defaultPreset: "thisMonth" } } });
+    for (const fontSize of [0, 1, 6, 10, 40, 100, -5, NaN, "abc", null]) {
+        i.setObjects({ appearance: { fontSize } });
+    }
+    for (const cornerRadius of [0, 3, 6, 8, 30, 999, -1, "x", null]) {
+        i.setObjects({ appearance: { cornerRadius } });
+    }
+    for (const value of ["#ffffff", "#000000", "#fff", "red", "", null, "not-a-colour", "#abcdef"]) {
+        i.setObjects({ appearance: { accentColor: colour(value), textColor: colour(value) } });
+    }
+    for (const fontFamily of ["", "Bahnschrift", "'Weird Font', serif", null]) {
+        i.setObjects({ appearance: { fontFamily } });
+    }
+    assert(i.dates().length === 2, "rows expected after all extremes");
+});
+
+/** The format pane must build for any configuration (Power BI opens it on demand). */
+const expectFormatPane = (instance, label) => {
+    const model = instance.visual.getFormattingModel();
+    assert(Array.isArray(model?.cards) && model.cards.length >= 4, `${label}: format pane model expected`);
+};
+
+scenario("format", "every layout, calendar and arrows combination (incl. junk values), with the format pane", async ({ make }) => {
+    const i = make({ width: 600, height: 400, objects: { period: { defaultPreset: "thisMonth" } } });
+    for (const mode of ["picker", "panel", "full", "junk", null]) {
+        for (const calendar of ["stacked", "dialog", "native", "junk", null]) {
+            for (const showArrows of [true, false]) {
+                i.setObjects({ layout: { mode, calendar, showArrows }, period: { defaultPreset: "thisMonth" } });
+                // Unknown dropdown values are dropped by the formatting utils: picker, stacked.
+                const panel = mode === "panel";
+                assert(!!i.q(".drs-panel") === panel, `panel presence wrong for mode ${mode}`);
+                assert(!!i.qa(".drs-side .drs-icon-button").length === showArrows || (!panel && calendar === "dialog"), `arrows wrong for ${mode}/${calendar}`);
+                expectFormatPane(i, `${mode}/${calendar}`);
+            }
+        }
+    }
+    i.setObjects({ layout: { mode: "picker", calendar: "dialog" } });
+    assert(i.q(".drs-range-field"), "range field expected in dialog mode");
+});
+
+scenario("format", "the format pane builds with junk values, without a field and with a text column", async ({ make }) => {
+    const i = make({ column: "none" });
+    expectFormatPane(i, "landing");
+    i.update({ column: "text" });
+    expectFormatPane(i, "text column");
+    i.update({ column: "dateTime" });
+    const junk = {
+        period: { defaultPreset: "zzz", language: 5, dateStyle: {}, weekStart: [] },
+        presets: { today: "yes", all: null },
+        layout: { mode: 1, calendar: true, showArrows: "no" },
+        appearance: { accentColor: "red", textColor: { solid: {} }, fontFamily: 3, fontSize: "big", cornerRadius: {} },
+        selectionState: { state: {} },
+    };
+    i.setObjects(junk);
+    expectFormatPane(i, "junk");
+    assert(i.dates().length === 2, "rows expected with junk settings");
+});
+
+scenario("format", "every language, date style and week start, compact and two-month panel", async ({ make }) => {
+    for (const layout of [{ mode: "picker" }, { mode: "panel" }]) {
+        const i = make({ width: 640, height: 400, objects: { layout, period: { defaultPreset: "lastMonth" } } });
+        for (const language of [...LANGUAGES, "junk", "", null]) {
+            i.setObjects({ layout, period: { defaultPreset: "lastMonth", language } });
+            assert(i.dates().length === 2 && i.dates().every(t => t.length > 0), `dates expected in ${language}`);
+        }
+        for (const dateStyle of ["auto", "short", "numeric", "long", "junk", null]) {
+            i.setObjects({ layout, period: { defaultPreset: "lastMonth", dateStyle } });
+        }
+        for (const weekStart of ["auto", "monday", "sunday", "junk", null]) {
+            i.setObjects({ layout, period: { defaultPreset: "lastMonth", weekStart } });
+        }
+        if (layout.mode === "panel") {
+            assert(i.qa(".drs-month").length === 2, "two months expected at this width");
+        }
+    }
+});
+
+scenario("format", "hidden presets: the menu still offers the current period", async ({ make }) => {
+    const off = Object.fromEntries([...PRESETS, "all"].map(p => [p, false]));
+    const i = make({ objects: { presets: off, period: { defaultPreset: "thisMonth" } } });
+    await i.openMenu();
+    assert(i.q('[data-focus-key="menu-thisMonth"]'), "current (hidden) preset must still be listed");
+    assert(!i.q('[data-focus-key="menu-all"]'), "'all' is hidden");
+    assert(!i.q('[data-focus-key="menu-lastYear"]'), "hidden presets are not listed");
+});
+
+scenario("core", "every default preset applies; › then ‹ returns to the default", async ({ make, wait }) => {
+    for (const preset of [...PRESETS, "all"]) {
+        const i = make({ objects: { period: { defaultPreset: preset === "all" ? "" : preset }, presets: { all: true } } });
+        await wait(60);
+        if (preset === "all") {
+            assert(i.range() === null, "all: no filter");
+            assert(i.isDefault(), "all: ⚡ shows the default");
+            assert(i.q(".drs-side .drs-icon-button").disabled, "arrows disabled under all dates");
+            continue;
+        }
+        const before = i.range();
+        assert(before && i.isDefault(), `${preset}: filter and default badge expected`);
+        i.qa(".drs-side .drs-icon-button")[1].click();
+        await wait(60);
+        const stepped = i.range();
+        assert(stepped.start !== before.start && !i.isDefault(), `${preset}: › must change the range and clear the badge`);
+        i.qa(".drs-side .drs-icon-button")[0].click();
+        await wait(60);
+        const back = i.range();
+        assert(back.start === before.start && back.end === before.end, `${preset}: ‹ must return to ${before.start}..${before.end}, got ${back.start}..${back.end}`);
+        assert(i.isDefault(), `${preset}: ⚡ must be full again`);
+        assert(i.log.failed.length === 0, `${preset}: rendering failed`);
+    }
+});
+
+// ---- host -----------------------------------------------------------------
+
+scenario("host", "interactions disabled (dashboard tile): nothing reacts", async ({ make, wait }) => {
+    const i = make({ capabilities: { allowInteractions: false, allowModalDialog: true }, objects: { period: { defaultPreset: "thisMonth" } } });
+    await wait(60);
+    const filters = i.log.filters.length;
+    i.quick().click();
+    await wait(30);
+    assert(!i.q(".drs-menu"), "menu must not open");
+    i.qa(".drs-side .drs-icon-button")[1].click();
+    await wait(60);
+    assert(i.log.filters.length === filters, "arrows must not apply filters");
+});
+
+scenario("host", "dialog layout without modal dialogs falls back to date fields", async ({ make, wait }) => {
+    const i = make({ capabilities: { allowInteractions: true, allowModalDialog: false }, objects: { layout: { calendar: "dialog" } } });
+    assert(i.q(".drs-fields"), "date fields expected");
+    i.setDate('[data-focus-key="field-from"]', "2026-03-05");
+    i.setDate('[data-focus-key="field-to"]', "2026-03-20");
+    await wait(60);
+    expectRange(i, day(2026, 3, 5), day(2026, 3, 20), "fields");
+    const count = i.log.filters.length;
+    i.setDate('[data-focus-key="field-to"]', "0202-03-20");
+    await wait(60);
+    assert(i.log.filters.length === count, "implausible year must be ignored");
+});
+
+scenario("host", "dialog blocked by the user: warning for everyone; other failures only in edit mode", async ({ make, wait }) => {
+    const blocked = make({ viewMode: ViewMode.View, objects: { layout: { calendar: "dialog" } }, dialog: { mode: "reject", code: 3 } });
+    blocked.click(".drs-range-field");
+    await wait(60);
+    assert(blocked.q(".drs-fields") && blocked.q(".drs-dialog-warning"), "fields + warning expected when blocked");
+    const viewer = make({ viewMode: ViewMode.View, objects: { layout: { calendar: "dialog" } }, dialog: { mode: "reject", code: 2 } });
+    viewer.click(".drs-range-field");
+    await wait(60);
+    assert(viewer.q(".drs-fields") && !viewer.q(".drs-dialog-warning"), "no warning for readers on a technical failure");
+    const author = make({ viewMode: ViewMode.Edit, objects: { layout: { calendar: "dialog" } }, dialog: { mode: "reject", code: 2 } });
+    author.click(".drs-range-field");
+    await wait(60);
+    assert(author.q(".drs-dialog-warning"), "authors see the technical failure");
+}, [{ level: "warn", text: "range dialog unavailable" }]);
+
+scenario("host", "dialog OK applies the range, Cancel and junk results keep it", async ({ make, wait }) => {
+    const i = make({ objects: { layout: { calendar: "dialog" }, period: { defaultPreset: "thisMonth" } }, dialog: { mode: "ok", result: { start: "2026-02-03", end: "2026-02-14" } } });
+    await wait(60);
+    i.click(".drs-range-field");
+    await wait(80);
+    expectRange(i, day(2026, 2, 3), day(2026, 2, 14), "dialog OK");
+    const count = i.log.filters.length;
+    i.options.dialog = { mode: "cancel" };
+    i.click(".drs-range-field");
+    await wait(80);
+    assert(i.log.filters.length === count, "Cancel must not apply");
+    for (const result of [null, {}, { start: 5 }, { start: "x", end: "y" }, "zzz"]) {
+        i.options.dialog = { mode: "ok", result };
+        i.click(".drs-range-field");
+        await wait(60);
+    }
+    assert(i.log.filters.length === count, "junk results must not apply");
+    assert(i.log.dialogs.every(d => d.dialogOptions.size.width === 640), "dialog options passed");
+});
+
+scenario("host", "high-contrast palette replaces the colours", async ({ make }) => {
+    const i = make({ highContrast: true, objects: { period: { defaultPreset: "thisMonth" } } });
+    assert(i.element.classList.contains("drs--high-contrast"), "high-contrast class expected");
+    assert(getComputedStyle(i.element).getPropertyValue("--drs-accent").trim() === "#ffff00", "accent must come from the palette");
+    i.update({ objects: { layout: { mode: "panel" } }, width: 400, height: 400 });
+    i.setObjects({ layout: { mode: "panel" } });
+    assert(i.q(".drs-cal"), "calendar in high contrast");
+});
+
+scenario("host", "unknown or empty locales fall back to English", async ({ make }) => {
+    for (const locale of ["xx-YY", "", undefined, "pt", "en", "zh-TW", "ja"]) {
+        const i = make({ locale, column: "none" });
+        assert(i.q(".drs-landing-title"), `landing expected for locale ${locale}`);
+        i.update({ column: "dateTime" });
+        assert(i.dates().length === 2, `rows expected for locale ${locale}`);
+    }
+});
+
+scenario("host", "authors get the 'if you save now' warning, readers don't", async ({ make, wait }) => {
+    const author = make({ viewMode: ViewMode.Edit, objects: { period: { defaultPreset: "thisMonth" } } });
+    await author.pick("lastMonth");
+    assert(author.quick().title.includes("If you save now"), "author warning expected");
+    const reader = make({ viewMode: ViewMode.View, objects: { period: { defaultPreset: "thisMonth" } } });
+    await reader.pick("lastMonth");
+    assert(!reader.quick().title.includes("If you save now"), "no warning for readers");
+});
+
+scenario("host", "right click opens the Power BI context menu", async ({ make }) => {
+    const i = make();
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 });
+    i.q(".drs-stack").dispatchEvent(event);
+    assert(i.log.contextMenus === 1 && event.defaultPrevented, "showContextMenu expected");
+});
+
+scenario("host", "landing link goes through launchUrl", async ({ make }) => {
+    const i = make({ column: "none", width: 500, height: 420 });
+    i.click(".drs-landing-link");
+    assert(i.log.launched[0]?.startsWith("https://"), "launchUrl expected");
+});
+
+// ---- interact -------------------------------------------------------------
+
+scenario("interact", "drum menu: open on the active row, turn, pick, Escape, Ctrl+click", async ({ make, wait }) => {
+    const i = make({ objects: { period: { defaultPreset: "thisMonth" } } });
+    await wait(60);
+    await i.openMenu();
+    assert(i.q(".drs-drum"), "drum expected in a low bar");
+    assert(i.q(".drs-drum-row--current .drs-menu-item--active"), "opens on the active period");
+    const before = i.q(".drs-drum-row--current").dataset.row;
+    i.q(".drs-menu").dispatchEvent(new WheelEvent("wheel", { deltaY: 100, bubbles: true, cancelable: true }));
+    await wait(30);
+    assert(i.q(".drs-drum-row--current").dataset.row === String(Number(before) + 1), "one notch = one row");
+    i.q(".drs-drum-row--current .drs-menu-item").click();
+    await wait(80);
+    assert(!i.q(".drs-menu"), "menu closes after a pick");
+    assert(document.activeElement === i.quick(), "focus returns to ⚡");
+    assert(!i.isDefault(), "a different period: badge off");
+    await i.openMenu();
+    i.key(".drs-menu", "Escape");
+    await wait(30);
+    assert(!i.q(".drs-menu"), "Escape closes the menu");
+    i.quick().dispatchEvent(new MouseEvent("click", { ctrlKey: true, bubbles: true }));
+    await wait(80);
+    assert(i.isDefault() && !i.q(".drs-menu"), "Ctrl+click returns to the default without opening the menu");
+});
+
+scenario("interact", "menu closes when the window loses focus", async ({ make, wait }) => {
+    const i = make();
+    await i.openMenu();
+    window.dispatchEvent(new Event("blur"));
+    await wait(30);
+    assert(!i.q(".drs-menu"), "menu must close on blur");
+});
+
+scenario("interact", "panel: two clicks pick a range, Escape cancels a draft", async ({ make, wait }) => {
+    const t = today();
+    const i = make({ width: 640, height: 420, objects: { layout: { mode: "panel" }, period: { defaultPreset: "thisMonth" } } });
+    await wait(60);
+    const a = day(t.getFullYear(), t.getMonth(), 3);
+    const b = day(t.getFullYear(), t.getMonth(), 11);
+    i.click(`[data-focus-key="day-${dayKey(a)}"]`);
+    assert(i.q(".drs-stack--picking"), "draft expected after the first click");
+    i.key(`[data-focus-key="day-${dayKey(a)}"]`, "Escape");
+    assert(!i.q(".drs-stack--picking"), "Escape cancels the draft");
+    i.click(`[data-focus-key="day-${dayKey(a)}"]`);
+    i.click(`[data-focus-key="day-${dayKey(b)}"]`);
+    await wait(80);
+    expectRange(i, a, b, "two clicks");
+    assert(!i.isDefault(), "custom range: badge off");
+});
+
+scenario("interact", "panel: month navigation by arrows and keyboard, row click and double click", async ({ make, wait }) => {
+    const t = today();
+    const i = make({ width: 640, height: 420, objects: { layout: { mode: "panel" }, period: { defaultPreset: "thisMonth" } } });
+    await wait(60);
+    const title = () => i.q(".drs-month-title").textContent;
+    const first = title();
+    i.click(".drs-month-head .drs-icon-button");
+    assert(title() !== first, "previous month expected");
+    i.qa(".drs-month-head .drs-icon-button").at(-1).click();
+    assert(title() === first, "next month restores");
+    const firstDay = i.q(`[data-focus-key="day-${dayKey(monthStart(t, -1))}"]`);
+    i.key(firstDay, "ArrowLeft");
+    assert(title() !== first, "ArrowLeft past the first day navigates");
+    await i.pick("lastYear");
+    i.click('[data-focus-key="row-start"]');
+    assert(title().includes(String(t.getFullYear() - 1)), "start row scrolls the calendar to its month");
+    i.click('[data-focus-key="row-end"]');
+    await wait(50);
+    i.click('[data-focus-key="row-end"]');
+    await wait(80);
+    assert(i.isDefault(), "double click returns to the default");
+});
+
+scenario("interact", "compact rows: native date inputs never produce an inverted range", async ({ make, wait }) => {
+    const t = today();
+    const i = make({ objects: { period: { defaultPreset: "thisMonth" } } });
+    await wait(60);
+    const before = i.range();
+    const earlier = dayKey(addDays(monthStart(t, 0), -5));
+    i.setDate('[data-focus-key="date-end"]', earlier);
+    await wait(60);
+    let r = i.range();
+    assert(r.start === earlier && r.end === earlier, `end before start: start must follow (got ${r.start}..${r.end})`);
+    const later = dayKey(addDays(t, 40));
+    i.setDate('[data-focus-key="date-start"]', later);
+    await wait(60);
+    r = i.range();
+    assert(r.start === later && r.end === later, `start after end: end must follow (got ${r.start}..${r.end})`);
+    i.setDate('[data-focus-key="date-start"]', "0202-01-01");
+    await wait(60);
+    assert(i.range().start === later, "implausible years are ignored");
+    assert(before.start !== r.start, "sanity");
+});
+
+scenario("interact", "arrows step whole months by months and other ranges by their length", async ({ make, wait }) => {
+    const t = today();
+    const i = make({ objects: { period: { defaultPreset: "lastMonth" } } });
+    await wait(60);
+    i.qa(".drs-side .drs-icon-button")[1].click();
+    await wait(60);
+    expectRange(i, monthStart(t, 0), monthEnd(t, 0), "month forward");
+    i.setDate('[data-focus-key="date-start"]', "2026-03-01");
+    await wait(60);
+    i.setDate('[data-focus-key="date-end"]', "2026-03-07");
+    await wait(60);
+    i.qa(".drs-side .drs-icon-button")[1].click();
+    await wait(60);
+    expectRange(i, day(2026, 3, 8), day(2026, 3, 14), "7-day step");
+});
+
+scenario("interact", "several instances on one page stay independent", async ({ make, wait }) => {
+    const a = make({ objects: { period: { defaultPreset: "thisMonth" } } });
+    const b = make({ objects: { period: { defaultPreset: "lastYear" } } });
+    const c = make({ width: 640, height: 400, objects: { layout: { mode: "panel" }, period: { defaultPreset: "last7Days" } } });
+    const d = make({ column: "none" });
+    await wait(80);
+    const rb = b.range(), rc = c.range();
+    await a.pick("yesterday");
+    assert(a.range().start === dayKey(addDays(today(), -1)), "a changed");
+    assert(b.range().start === rb.start && c.range().start === rc.start, "b and c unchanged");
+    assert(d.q(".drs-landing"), "d still on the landing page");
+    assert([a, b, c, d].every(x => x.log.failed.length === 0), "no rendering failures");
+});
+
+scenario("interact", "twenty back-to-back updates don't re-apply the filter (no loop)", async ({ make, wait }) => {
+    const i = make({ objects: { period: { defaultPreset: "thisMonth" } } });
+    await wait(60);
+    for (let k = 0; k < 20; k++) {
+        i.update();
+    }
+    await wait(80);
+    assert(i.log.filters.length === 1, `filter applied ${i.log.filters.length} times`);
+    expectRange(i, monthStart(today(), 0), monthEnd(today(), 0), "stable");
+});
+
+scenario("interact", "a stale echo of the old filter does not flicker the UI back", async ({ make, wait }) => {
+    const t = today();
+    const i = make({ objects: { period: { defaultPreset: "thisMonth" } }, echoDelay: 150 });
+    await wait(200);
+    const old = i.jsonFilters;
+    await i.openMenu();
+    const item = i.q('[data-focus-key="menu-lastMonth"]');
+    item.closest(".drs-drum-row").click();
+    await wait(20);
+    item.click();
+    // Power BI calls update() with the previous filter before the new one lands.
+    i.jsonFilters = old;
+    i.update();
+    const shown = i.dates()[0];
+    await wait(250);
+    assert(i.dates()[0] === shown, "UI must keep the new selection through the stale update");
+    expectRange(i, monthStart(t, -1), monthEnd(t, -1), "after echo");
+});
+
+scenario("interact", "animations run only for user actions and are gone on later updates", async ({ make, wait }) => {
+    const i = make({ objects: { period: { defaultPreset: "lastMonth" } } });
+    await wait(60);
+    assert(!/drs-anim-/.test(i.element.className), "no animation on host-driven updates");
+    i.qa(".drs-side .drs-icon-button")[1].click();
+    assert(/drs-anim-dates/.test(i.element.className), "arrow click animates");
+    await wait(1200);
+    i.update();
+    assert(!/drs-anim-/.test(i.element.className), "animation classes cleared on the next update");
+    const landing = make({ column: "none", width: 500, height: 420 });
+    assert(/drs-anim-landing/.test(landing.element.className), "landing animates once in edit mode");
+    const reader = make({ column: "none", width: 500, height: 420, viewMode: ViewMode.View });
+    assert(!/drs-anim-landing/.test(reader.element.className), "no landing animation in reading view");
+});
+
+scenario("perf", "resize storm: 200 sizes from 20×20 to 4000×3000, both layouts", async ({ make, report }) => {
+    let max = 0;
+    for (const layout of [{ mode: "picker" }, { mode: "panel" }]) {
+        const i = make({ objects: { layout, period: { defaultPreset: "thisMonth" } } });
+        let seed = 7;
+        const random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+        const sizes = [[20, 20], [4000, 3000], [1, 1], [180, 40], ...Array.from({ length: 196 }, () => [Math.round(20 + random() * 1980), Math.round(20 + random() * 980)])];
+        for (const [w, h] of sizes) {
+            max = Math.max(max, i.resize(w, h));
+        }
+        assert(i.log.failed.length === 0, `${layout.mode}: rendering failed`);
+    }
+    report(`slowest resize update: ${max.toFixed(1)} ms`);
+    assert(max < 100, `a resize update took ${max.toFixed(0)} ms`);
+});
+
+scenario("perf", "steady-state update cost (median of 100): compact bar, two-month panel, menu open", async ({ make, report }) => {
+    const median = values => values.slice().sort((a, b) => a - b)[Math.floor(values.length / 2)];
+    const bar = make({ objects: { period: { defaultPreset: "thisMonth" } } });
+    const panel = make({ width: 640, height: 400, objects: { layout: { mode: "panel" }, period: { defaultPreset: "thisMonth" } } });
+    const results = {};
+    results.bar = median(Array.from({ length: 100 }, () => bar.update()));
+    results.panel = median(Array.from({ length: 100 }, () => panel.update()));
+    const menu = make({ objects: { period: { defaultPreset: "thisMonth" } } });
+    const toggles = [];
+    for (let k = 0; k < 50; k++) {
+        const started = performance.now();
+        menu.quick().click();
+        toggles.push(performance.now() - started);
+    }
+    results.menuToggle = median(toggles);
+    report(`bar ${results.bar.toFixed(2)} ms · panel ${results.panel.toFixed(2)} ms · menu toggle ${results.menuToggle.toFixed(2)} ms`);
+    assert(results.bar < 10 && results.panel < 30, "updates slower than expected");
+});
+
+// ---- tz (run by run.mjs under a timezone override) ------------------------
+
+scenario("tz", "presets are computed at local midnight of the viewer's day", async ({ make, wait, report }) => {
+    const t = today();
+    const i = make({ objects: { period: { defaultPreset: "today" } } });
+    await wait(60);
+    let r = i.range();
+    assert(r.start === dayKey(t) && r.end === dayKey(t) && r.startHours === 0, `today: ${JSON.stringify(r)}`);
+    i.setObjects({ period: { defaultPreset: "thisMonth" } });
+    await wait(60);
+    r = i.range();
+    assert(r.start === dayKey(monthStart(t, 0)) && r.end === dayKey(monthEnd(t, 0)) && r.startHours === 0, `thisMonth: ${JSON.stringify(r)}`);
+    i.setObjects({ period: { defaultPreset: "lastMonth" } });
+    await wait(60);
+    r = i.range();
+    assert(r.start === dayKey(monthStart(t, -1)) && r.end === dayKey(monthEnd(t, -1)), `lastMonth: ${JSON.stringify(r)}`);
+    report(`today is ${dayKey(t)}, offset ${-t.getTimezoneOffset() / 60}h`);
+});
+
+// ---- motion (run by run.mjs with prefers-reduced-motion: reduce) ------------
+
+scenario("motion", "reduced motion: no animations or drum transitions", async ({ make, wait }) => {
+    const landing = make({ column: "none", width: 500, height: 420 });
+    assert(getComputedStyle(landing.q(".drs-landing-logo")).animationName === "none", "landing logo must not animate");
+    const i = make({ objects: { period: { defaultPreset: "thisMonth" } } });
+    await wait(60);
+    await i.openMenu();
+    assert(getComputedStyle(i.q(".drs-menu-item")).animationName === "none", "menu items must not animate");
+    assert(getComputedStyle(i.q(".drs-drum-row")).transitionDuration.split(",").every(v => v.trim() === "0s"), "drum must not transition");
+});
+
+// ---------------------------------------------------------------------------
+// Runner
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs the scenarios of the given groups (all but tz/motion when omitted).
+ * @param groups Group names.
+ * @returns One result per scenario: { group, name, ok, ms, error, console, failed, maxUpdateMs, updates, notes }.
+ */
+harness.run = async function run(groups) {
+    const selected = scenarios.filter(s => groups ? groups.includes(s.group) : !["tz", "motion"].includes(s.group));
+    const results = [];
+    for (const s of selected) {
+        harness.current = s.name;
+        const instances = [];
+        const notes = [];
+        const started = performance.now();
+        let ok = true;
+        let error = null;
+        try {
+            await s.fn({ make: o => { const i = new Instance(o); instances.push(i); return i; }, assert, wait, report: note => notes.push(note) });
+        } catch (e) {
+            ok = false;
+            error = e?.stack ?? String(e);
+        }
+        instances.forEach(i => i.destroy());
+        await wait(10);
+        const consoleEntries = harness.console.filter(c => c.scenario === s.name && !s.allow.some(a => c.level === a.level && c.text.includes(a.text)));
+        const failed = instances.flatMap(i => i.log.failed);
+        const updateMs = instances.flatMap(i => i.log.updateMs);
+        const unbalanced = instances.filter(i => i.log.started !== i.log.finished + i.log.failed.length).length;
+        results.push({
+            group: s.group, name: s.name, ok: ok && consoleEntries.length === 0 && failed.length === 0 && unbalanced === 0,
+            ms: Math.round(performance.now() - started), error, console: consoleEntries, failed, unbalanced,
+            maxUpdateMs: updateMs.length ? Math.max(...updateMs) : 0, updates: updateMs.length, notes,
+        });
+    }
+    harness.current = null;
+    harness.results.push(...results);
+    return results;
+};
+
+/** Memory check helpers (driven by run.mjs around forced garbage collections). */
+harness.memory = {
+    instance: null,
+    prepare() {
+        this.instance = new Instance({ width: 640, height: 400, objects: { layout: { mode: "panel" }, period: { defaultPreset: "thisMonth" } } });
+    },
+    /** Alternates filters, sizes and menu state over `n` updates, as a busy report would. */
+    storm(n) {
+        const i = this.instance;
+        const t = today();
+        const filters = [[], [{ conditions: [{ operator: "GreaterThanOrEqual", value: monthStart(t, -1).toJSON() }, { operator: "LessThan", value: monthStart(t, 0).toJSON() }] }]];
+        for (let k = 0; k < n; k++) {
+            i.jsonFilters = filters[k % 2];
+            i.resize(500 + (k % 7) * 20, 350 + (k % 5) * 10);
+            if (k % 10 === 0) {
+                i.quick().click();
+                i.quick().click();
+            }
+        }
+        return n;
+    },
+    /** Creates and discards `n` instances (new visual per iframe in Power BI). */
+    churn(n) {
+        for (let k = 0; k < n; k++) {
+            new Instance({ objects: { period: { defaultPreset: "lastMonth" } } }).destroy();
+        }
+        return n;
+    },
+};
+</script>
+</body>
+</html>

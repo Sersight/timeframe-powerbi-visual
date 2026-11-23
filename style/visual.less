@@ -1,0 +1,1216 @@
+// Design tokens live in CSS variables so the format pane (accent, font, corners) and
+// high-contrast mode can override them from code without touching the markup.
+// Surfaces are transparent by default so the slicer blends into any report background,
+// and secondary tones are mixed from the text colour so they work on dark reports too.
+.drs {
+    --drs-accent: #167099; // Sersight brand blue
+    --drs-on-accent: #ffffff;
+    --drs-text: #1f2937;
+    --drs-muted: color-mix(in srgb, var(--drs-text) 62%, transparent);
+    --drs-border: color-mix(in srgb, var(--drs-text) 16%, transparent);
+    --drs-surface: transparent;
+    --drs-hover: color-mix(in srgb, var(--drs-text) 7%, transparent);
+    --drs-soft: color-mix(in srgb, var(--drs-accent) 13%, transparent);
+    --drs-soft-preview: color-mix(in srgb, var(--drs-accent) 7%, transparent);
+    // Overridden from the format pane's corner radius (applyCornerRadius in dom.ts).
+    --drs-radius: 8px;
+    --drs-pill: 999px;
+    --drs-font: "Segoe UI", wf_segoe-ui_normal, helvetica, arial, sans-serif;
+    // Set from code while an animation runs (see motion.ts); defaults keep calc() valid.
+    --drs-anim-delay: 0ms;
+    --drs-anim-x: 0;
+    --drs-anim-y: 0;
+
+    box-sizing: border-box;
+    height: 100%;
+    overflow: auto;
+    // Lets layout rules react to the width of the visual itself (@container below).
+    container-type: inline-size;
+    padding: 0.4em;
+    color: var(--drs-text);
+    font-family: var(--drs-font);
+    line-height: 1.3;
+    -webkit-font-smoothing: antialiased;
+
+    *, *::before, *::after {
+        box-sizing: inherit;
+    }
+
+    button, select, input {
+        font: inherit;
+        color: inherit;
+    }
+
+    button {
+        cursor: pointer;
+    }
+
+    :focus-visible {
+        outline: 2px solid var(--drs-accent);
+        outline-offset: 1px;
+    }
+}
+
+// In high contrast every surface is solid and every state is also marked by a border.
+.drs--high-contrast {
+    --drs-soft: transparent;
+    --drs-soft-preview: transparent;
+
+    .drs-day--in-range .drs-day-num {
+        outline: 1px dashed var(--drs-text);
+    }
+}
+
+.drs-icon {
+    width: 1em;
+    height: 1em;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.75;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.drs-icon-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 2.2em;
+    height: 2.2em;
+    padding: 0;
+    border: 1px solid var(--drs-border);
+    border-radius: var(--drs-pill);
+    background: var(--drs-surface);
+    color: var(--drs-text);
+    transition: background-color 0.15s, border-color 0.15s;
+
+    &:hover:not(:disabled) {
+        background: var(--drs-hover);
+    }
+
+    &:disabled {
+        opacity: 0.35;
+        cursor: default;
+    }
+}
+
+.drs-icon-spacer {
+    width: 1.9em;
+}
+
+// ---------------------------------------------------------------------------
+// Range picker bar (default layout)
+// ---------------------------------------------------------------------------
+
+.drs-picker {
+    display: flex;
+    align-items: center;
+    gap: 0.45em;
+    min-height: 100%;
+}
+
+// The main control: looks like an input so it reads as "click to choose dates".
+.drs-range-field {
+    display: flex;
+    align-items: center;
+    gap: 0.6em;
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 26em;
+    height: 2.5em;
+    padding: 0 0.85em;
+    border: 1px solid var(--drs-border);
+    border-radius: var(--drs-radius);
+    background: var(--drs-surface);
+    text-align: left;
+    transition: border-color 0.15s, box-shadow 0.15s;
+
+    > .drs-icon {
+        flex: none;
+        color: var(--drs-accent);
+    }
+
+    > .drs-icon:last-child {
+        margin-left: auto;
+        color: var(--drs-muted);
+    }
+
+    &:hover {
+        border-color: var(--drs-accent);
+    }
+
+    &:focus-visible {
+        outline: none;
+        border-color: var(--drs-accent);
+        box-shadow: 0 0 0 3px var(--drs-soft);
+    }
+}
+
+// Grows to fill the field so the chevron always sits on the right edge.
+.drs-range-text {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: baseline;
+    gap: 0.55em;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.drs-range-title {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.drs-range-dates {
+    color: var(--drs-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+// Stacked picker (default): fixed-size block, the selection never changes its layout.
+//   ┌───┬────────────────────┬───┐
+//   │   │ ●━  25/07/2026  📅 │ ‹ │
+//   │ ⚡ │ ━●  29/08/2026  📅 │ › │
+//   └───┴────────────────────┴───┘
+// Fills the visual height (two rows of at least 1.6em each); the extra ".drs-picker"
+// in the selectors beats the generic picker button sizes defined further down.
+.drs-picker.drs-picker--stacked {
+    align-items: stretch;
+    height: 100%;
+    min-height: 3.4em;
+
+    > .drs-icon-button {
+        width: 2.1em;
+        height: auto;
+        border-radius: var(--drs-radius);
+    }
+}
+
+.drs-stack {
+    display: grid;
+    grid-template-rows: minmax(1.6em, 1fr) minmax(1.6em, 1fr);
+    flex: 0 1 15em;
+    // As narrow as the dates themselves (no fixed minimum), so in a small visual the
+    // arrows on the right are never pushed out of view.
+    min-width: min-content;
+    border: 1px solid var(--drs-border);
+    border-radius: var(--drs-radius);
+    background: var(--drs-surface);
+    overflow: hidden;
+}
+
+.drs-stack-row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0.6em;
+    padding: 0 0.7em;
+    cursor: pointer;
+    transition: background-color 0.15s;
+
+    // Start/end markers in the accent; the calendar icon stays discreet.
+    > .drs-icon:first-child {
+        width: 1.25em;
+        color: var(--drs-accent);
+    }
+
+    > .drs-icon:nth-child(3) {
+        margin-left: auto;
+        color: var(--drs-muted);
+    }
+
+    &:hover {
+        background: var(--drs-hover);
+
+        > .drs-icon:nth-child(3) {
+            color: var(--drs-accent);
+        }
+    }
+
+    &:focus-within {
+        background: var(--drs-soft);
+    }
+}
+
+.drs-stack-row--start {
+    border-bottom: 1px solid var(--drs-border);
+}
+
+.drs-stack-date {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+// "All dates": the rows show the data's bounds, visibly softer than a real selection.
+.drs-stack-date--implicit {
+    font-weight: normal;
+    color: var(--drs-muted);
+}
+
+// Quick periods on the left, as tall as both date rows.
+.drs-picker.drs-picker--stacked > .drs-quick {
+    width: 2.4em;
+    height: auto;
+}
+
+// Right column: ‹ above ›, each one row high.
+.drs-picker .drs-side {
+    display: grid;
+    grid-template-rows: 1fr 1fr;
+    gap: 3px;
+
+    .drs-icon-button {
+        width: 2.1em;
+        height: 100%;
+        border-radius: var(--drs-radius);
+    }
+}
+
+// Invisible <input type="date"> over each row; its picker indicator is stretched over
+// it, so a click anywhere on the row opens the browser's calendar under that row.
+.drs-native-input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    opacity: 0;
+    cursor: pointer;
+
+    &::-webkit-calendar-picker-indicator {
+        position: absolute;
+        inset: 0;
+        width: auto;
+        height: auto;
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        cursor: pointer;
+    }
+}
+
+// Quick periods: the ⚡ button that opens the periods menu.
+.drs-quick {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 2.5em;
+    height: 2.5em;
+    padding: 0;
+    border: 1px solid var(--drs-border);
+    border-radius: var(--drs-radius);
+    background: var(--drs-surface);
+    color: var(--drs-muted);
+    transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+
+    &:hover {
+        border-color: var(--drs-accent);
+        color: var(--drs-accent);
+    }
+
+    &:focus-visible {
+        outline: none;
+        border-color: var(--drs-accent);
+        box-shadow: 0 0 0 3px var(--drs-soft);
+    }
+
+    .drs-icon {
+        width: 1.15em;
+        height: 1.15em;
+    }
+}
+
+// A quick period is active (a custom date range clears it).
+.drs-quick--active,
+.drs-quick--active:hover {
+    background: var(--drs-soft);
+    color: var(--drs-accent);
+}
+
+// Solid copy of the bolt over the outline one, clipped away from the top down: the
+// bolt is "empty" by default and "full" for the default period (see below).
+.drs-quick .drs-quick-solid {
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    fill: currentColor;
+    clip-path: inset(100% 0 0 0);
+    pointer-events: none;
+}
+
+// The active period is the report's default (format pane): accent border, full bolt.
+.drs-quick--default,
+.drs-quick--default:hover {
+    border-color: var(--drs-accent);
+    box-shadow: inset 0 0 0 1px var(--drs-accent);
+
+    .drs-quick-solid {
+        clip-path: inset(0);
+    }
+}
+
+.drs-picker .drs-icon-button {
+    width: 2.5em;
+    height: 2.5em;
+    border-radius: var(--drs-radius);
+}
+
+// ---------------------------------------------------------------------------
+// Small "!" badge explaining why the pop-up calendar is unavailable (edit mode only).
+.drs-dialog-warning {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 1.5em;
+    height: 1.5em;
+    border-radius: 50%;
+    background: #b45309;
+    color: #ffffff;
+    font-weight: 700;
+    cursor: help;
+}
+
+// ---------------------------------------------------------------------------
+// Range dialog (rendered by Power BI in its own frame)
+// ---------------------------------------------------------------------------
+
+.drs-dialog {
+    --drs-text: #1f2937;
+    padding: 0.75em 1em;
+    font-size: 10pt;
+    overflow: hidden;
+
+    .drs-cal-months {
+        justify-content: center;
+    }
+
+    // The summary line above already says "now pick the end date".
+    .drs-cal-hint {
+        display: none;
+    }
+}
+
+.drs-dialog-summary {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1em;
+    padding-bottom: 0.75em;
+    margin-bottom: 0.75em;
+    border-bottom: 1px solid var(--drs-border);
+}
+
+.drs-dialog-label {
+    color: var(--drs-muted);
+}
+
+.drs-dialog-dates {
+    font-size: 1.25em;
+    font-weight: 600;
+}
+
+// Fallback date inputs (when dialogs are unavailable)
+// ---------------------------------------------------------------------------
+
+.drs-fields {
+    display: inline-flex;
+    align-items: center;
+    height: 2.2em;
+    padding: 0 0.6em;
+    border: 1px solid var(--drs-border);
+    border-radius: var(--drs-pill);
+    background: var(--drs-surface);
+    transition: border-color 0.15s;
+
+    &:hover,
+    &:focus-within {
+        border-color: var(--drs-accent);
+    }
+}
+
+.drs-date {
+    border: 0;
+    background: transparent;
+    padding: 0 0.2em;
+
+    &:focus-visible {
+        outline: none;
+    }
+
+    &::-webkit-calendar-picker-indicator {
+        opacity: 0.55;
+        cursor: pointer;
+    }
+}
+
+.drs-fields-sep {
+    color: var(--drs-muted);
+    padding: 0 0.2em;
+}
+
+// ---------------------------------------------------------------------------
+// Panel (calendar always visible): the picker bar on top, the calendar below,
+// both in the same bordered, rounded language. It fills the visual's width (no
+// unexplained gap on the right); the author sizes it by resizing the visual.
+// ---------------------------------------------------------------------------
+
+.drs-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45em;
+    width: 100%;
+
+    // Months share the available width instead of stopping at a maximum, and can
+    // shrink until the day numbers (1.85em circles) touch.
+    .drs-month {
+        min-width: 12.7em;
+        max-width: none;
+    }
+}
+
+// In the panel the bar is a normal row (not the full visual height) and the date box
+// grows so the bar lines up with the calendar box below.
+// Tighter metrics for both stacked bars (compact and panel), so the arrows on the
+// right are never pushed out of a narrow visual.
+.drs-picker.drs-picker--stacked {
+    gap: 0.35em;
+
+    > .drs-quick {
+        width: 2.2em;
+    }
+
+    .drs-stack-row {
+        gap: 0.45em;
+        padding: 0 0.5em;
+    }
+
+    .drs-side .drs-icon-button {
+        width: 1.9em;
+    }
+}
+
+// Very narrow visual: drop the decorative calendar icon of the compact rows (the whole
+// row still opens the calendar) before anything else gets cut.
+@container (max-width: 230px) {
+    .drs-stack-row > .drs-icon:nth-child(3) {
+        display: none;
+    }
+}
+
+// Panel: the bar is a normal row (not the full visual height).
+.drs-picker.drs-picker--panel {
+    height: auto;
+    flex: none;
+
+    .drs-stack {
+        flex: 1 1 auto;
+    }
+}
+
+// Rows without a native picker: plain buttons that scroll the calendar to their month.
+.drs-stack-row--static {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    text-align: left;
+}
+
+// A pick is in progress in the calendar: the end row carries the instruction.
+.drs-stack--picking {
+    border-color: var(--drs-accent);
+}
+
+.drs-stack-date--hint {
+    color: var(--drs-accent);
+    font-weight: 600;
+    font-size: 0.9em;
+}
+
+.drs-panel-cal {
+    padding: 0.4em 0.35em 0.5em;
+    border: 1px solid var(--drs-border);
+    border-radius: var(--drs-radius);
+    background: var(--drs-surface);
+
+    // The end row already says "now pick the end date"; keep the live hint for screen readers only.
+    .drs-cal-hint {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: 0;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Calendar
+// ---------------------------------------------------------------------------
+
+.drs-cal {
+    min-width: 0;
+}
+
+.drs-cal-months {
+    display: flex;
+    gap: 1.25em;
+}
+
+.drs-month {
+    flex: 1 1 0;
+    min-width: 14em;
+    max-width: 20em;
+}
+
+.drs-month-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.25em;
+
+    .drs-icon-button {
+        width: 1.9em;
+        height: 1.9em;
+        border-color: transparent;
+    }
+}
+
+.drs-month-title {
+    font-weight: 600;
+}
+
+.drs-weekdays,
+.drs-days {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+}
+
+.drs-weekday {
+    padding-bottom: 0.2em;
+    text-align: center;
+    font-size: 0.8em;
+    font-weight: 600;
+    color: var(--drs-muted);
+}
+
+.drs-day {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 2.1em;
+    padding: 0;
+    border: 0;
+    background: transparent;
+
+    // Range band behind the numbers; halves on the start/end days make it look continuous.
+    &::before {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 0;
+        right: 0;
+        height: 1.85em;
+        transform: translateY(-50%);
+        background: transparent;
+    }
+
+    &:focus-visible {
+        outline: none;
+
+        .drs-day-num {
+            outline: 2px solid var(--drs-accent);
+            outline-offset: 1px;
+        }
+    }
+
+    &:hover .drs-day-num {
+        background: var(--drs-hover);
+    }
+}
+
+.drs-day--blank {
+    cursor: default;
+}
+
+.drs-day-num {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.85em;
+    height: 1.85em;
+    border-radius: var(--drs-pill);
+    font-variant-numeric: tabular-nums;
+    transition: background-color 0.12s, color 0.12s;
+}
+
+// Neighbouring months' days (single-month calendar): muted. Declared before the
+// start/end rules so a selected outside day still gets the solid accent.
+.drs-day--outside .drs-day-num {
+    color: var(--drs-muted);
+}
+
+.drs-day--today .drs-day-num {
+    color: var(--drs-accent);
+    font-weight: 700;
+
+    // Small dot under the number; low enough to stay clear of the digit's baseline.
+    &::after {
+        content: "";
+        position: absolute;
+        bottom: 0.12em;
+        width: 0.2em;
+        height: 0.2em;
+        border-radius: 50%;
+        background: currentColor;
+    }
+}
+
+.drs-day--in-range::before {
+    background: var(--drs-soft);
+}
+
+.drs-day--preview::before {
+    background: var(--drs-soft-preview);
+}
+
+// Round the band where a week row (or the month) starts or ends.
+.drs-days > :nth-child(7n + 1)::before,
+.drs-day--blank + .drs-day::before {
+    border-top-left-radius: var(--drs-pill);
+    border-bottom-left-radius: var(--drs-pill);
+}
+
+.drs-days > :nth-child(7n)::before,
+.drs-day:has(+ .drs-day--blank)::before {
+    border-top-right-radius: var(--drs-pill);
+    border-bottom-right-radius: var(--drs-pill);
+}
+
+.drs-day--start::before {
+    left: 50%;
+}
+
+.drs-day--end::before {
+    right: 50%;
+}
+
+.drs-day--start.drs-day--end::before {
+    display: none;
+}
+
+.drs-day--start .drs-day-num,
+.drs-day--end .drs-day-num,
+.drs-day--start:hover .drs-day-num,
+.drs-day--end:hover .drs-day-num {
+    background: var(--drs-accent);
+    color: var(--drs-on-accent);
+    font-weight: 600;
+}
+
+.drs-day--preview.drs-day--end:not(.drs-day--start) .drs-day-num {
+    background: transparent;
+    color: var(--drs-accent);
+    box-shadow: inset 0 0 0 1.5px var(--drs-accent);
+}
+
+.drs-cal-hint {
+    min-height: 1.3em;
+    margin-top: 0.4em;
+    font-size: 0.9em;
+    color: var(--drs-muted);
+}
+
+// ---------------------------------------------------------------------------
+// Landing page and messages
+// ---------------------------------------------------------------------------
+
+.drs-message {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    height: 100%;
+    padding: 1em;
+    text-align: center;
+    color: var(--drs-muted);
+}
+
+// Product landing page (no field yet): a short, friendly pitch.
+.drs-landing {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.8em;
+    max-width: 36em;
+    min-height: 100%;
+    margin: 0 auto;
+    padding: 0.75em 1em;
+}
+
+.drs-landing-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.75em;
+}
+
+.drs-landing-logo {
+    flex: none;
+    width: 3.4em;
+    height: 3.4em;
+}
+
+.drs-landing-title {
+    font-size: 1.6em;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    line-height: 1.15;
+}
+
+.drs-landing-by {
+    color: var(--drs-muted);
+}
+
+.drs-landing-tagline {
+    margin: 0;
+    font-size: 1.1em;
+}
+
+.drs-landing-features {
+    display: grid;
+    gap: 0.4em;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.drs-landing-feature {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.55em;
+
+    .drs-icon {
+        flex: none;
+        margin-top: 0.15em;
+        color: var(--drs-accent);
+        stroke-width: 2.2;
+    }
+}
+
+// "How to start" callout.
+.drs-landing-start {
+    padding: 0.55em 0.8em;
+    border-left: 3px solid var(--drs-accent);
+    border-radius: 0 var(--drs-radius) var(--drs-radius) 0;
+    background: var(--drs-soft);
+    font-weight: 600;
+}
+
+// Extra class in the selector beats the generic ".drs button { color: inherit }" rule.
+.drs .drs-landing-link {
+    align-self: flex-start;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--drs-accent);
+    font-weight: 600;
+
+    &:hover {
+        text-decoration: underline;
+    }
+}
+
+// Small visuals: one compact row with logo, name and how to start.
+.drs-landing--mini {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4em 1em;
+    max-width: none;
+    padding: 0.25em 0.5em;
+
+    .drs-landing-logo {
+        width: 2em;
+        height: 2em;
+    }
+
+    .drs-landing-title {
+        font-size: 1.15em;
+    }
+
+    .drs-landing-by {
+        display: none;
+    }
+
+    .drs-landing-start {
+        padding: 0.25em 0.6em;
+        font-weight: normal;
+    }
+}
+
+.drs-landing--compact .drs-landing-logo {
+    width: 2.6em;
+    height: 2.6em;
+}
+
+// ---------------------------------------------------------------------------
+// Quick-periods menu (drawn inside the visual, in place of the dates or calendar)
+// ---------------------------------------------------------------------------
+// Two layouts, chosen by fitMenu in visual.ts from the space available: every group
+// at once ("wrap"), or a drum turning one period at a time. Rows are a fixed 1.75em
+// with 0.2em gaps: keep in sync with MENU_ROW_EM / MENU_GAP_EM.
+
+// ⚡ while the menu is open: pressed look, it is also the way to close it.
+.drs-quick--open,
+.drs-quick--open:hover {
+    background: var(--drs-soft);
+    border-color: var(--drs-accent);
+    color: var(--drs-accent);
+}
+
+// Picker with the menu open: ⚡ as tall as the bar, the menu takes the rest.
+.drs-picker.drs-picker--menu {
+    align-items: stretch;
+    height: 100%;
+    min-height: 2.2em;
+
+    > .drs-quick {
+        width: 2.2em;
+        height: auto;
+    }
+}
+
+.drs-panel--menu {
+    height: 100%;
+}
+
+// Same bordered box as the calendar, stretched to the bottom of the visual.
+.drs-panel-menu {
+    display: flex;
+    flex: 1 1 0;
+    min-height: 0;
+}
+
+.drs-menu {
+    display: flex;
+    gap: 0 1.1em;
+    flex: 1 1 auto;
+    min-width: 0;
+    // Slightly smaller than the dates (same font): a menu reads as secondary and
+    // more periods fit in a short bar.
+    font-size: 0.85em;
+    overflow: hidden;
+}
+
+// Room for the longest group: groups wrap onto lines, top-left aligned; a narrow,
+// tall panel scrolls down (a thin scrollbar is the natural cue there).
+.drs-menu.drs-menu--wrap {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    align-content: flex-start;
+    row-gap: 0.7em;
+    overflow-y: auto;
+    scrollbar-width: thin;
+}
+
+// Drum (short bar): one period per row, on a cylinder. The current row faces the
+// reader; the rows just before and after peek out above and below, smaller and tilted
+// away; the others are hidden behind. Turning = new classes on the same rows
+// (setDrumRow in visual.ts), so the move is a transition, not a rebuild.
+.drs-drum {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
+    // No perspective on purpose: with it, tilted rows look slanted (italic). The tilt
+    // alone (a vertical squash) plus size and fading reads as a turning drum.
+}
+
+.drs-drum-row {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.3em;
+    height: 1.75em;
+    transform: translateY(-50%);
+    // Rows shrink towards the left edge, so labels and periods stay lined up.
+    transform-origin: left center;
+    transition: transform 0.3s cubic-bezier(0.2, 0.7, 0.3, 1), opacity 0.3s, visibility 0.3s;
+}
+
+// Peeking rows: a click turns the drum to them (they can't be picked directly).
+.drs-drum-row--prev,
+.drs-drum-row--next {
+    opacity: 0.45;
+    cursor: pointer;
+
+    &:hover {
+        opacity: 0.7;
+    }
+
+    .drs-menu-item {
+        pointer-events: none;
+    }
+}
+
+// Offsets and sizes fit DRUM_EXTENT_EM (visual.ts): keep them in step.
+.drs-drum-row--prev {
+    transform: translateY(calc(-50% - 1.45em)) rotateX(32deg) scale(0.7);
+}
+
+.drs-drum-row--next {
+    transform: translateY(calc(-50% + 1.45em)) rotateX(-32deg) scale(0.7);
+}
+
+.drs-drum-row--before,
+.drs-drum-row--after {
+    opacity: 0;
+    visibility: hidden;
+}
+
+.drs-drum-row--before {
+    transform: translateY(calc(-50% - 2.6em)) rotateX(80deg) scale(0.6);
+}
+
+.drs-drum-row--after {
+    transform: translateY(calc(-50% + 2.6em)) rotateX(-80deg) scale(0.6);
+}
+
+// In a very narrow visual a long period name is shortened rather than overflowing.
+.drs .drs-drum .drs-menu-item {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .drs-drum-row {
+        transition: none;
+    }
+}
+
+.drs-menu-group {
+    display: grid;
+    grid-auto-flow: column;
+    grid-template-rows: repeat(var(--drs-menu-rows, 6), 1.75em);
+    grid-auto-columns: max-content;
+    gap: 0.2em 0.3em;
+    align-items: center;
+}
+
+.drs-menu-title {
+    padding: 0 0.6em;
+    font-size: 0.75em;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    color: var(--drs-muted);
+}
+
+// Extra class in the selector beats the generic ".drs button" rules.
+.drs .drs-menu-item {
+    height: 1.6em;
+    padding: 0 0.75em;
+    border: 0;
+    border-radius: var(--drs-pill);
+    background: transparent;
+    text-align: left;
+    white-space: nowrap;
+    transition: background-color 0.12s, color 0.12s;
+
+    &:hover {
+        background: var(--drs-hover);
+    }
+
+    &:focus-visible {
+        outline-offset: -2px;
+    }
+}
+
+// The format-pane default: accent outline, as on ⚡.
+.drs .drs-menu-item--default {
+    box-shadow: inset 0 0 0 1px var(--drs-accent);
+}
+
+.drs .drs-menu-item--active,
+.drs .drs-menu-item--active:hover {
+    background: var(--drs-accent);
+    color: var(--drs-on-accent);
+    font-weight: 600;
+}
+
+// ---------------------------------------------------------------------------
+// Animations (started by user actions only, see motion.ts)
+// ---------------------------------------------------------------------------
+// Every animation runs *towards* the element's normal look ("backwards" fill), so a
+// render that happens without an animation class simply shows the final state.
+// `--drs-anim-delay` is negative after a re-render, resuming where the animation was.
+// Readers who asked their system for reduced motion get no animation at all.
+
+@media (prefers-reduced-motion: no-preference) {
+    // 1. Month navigation: the months slide in from the side they come from.
+    .drs-anim-month {
+        .drs-panel-cal {
+            // No scrollbar flash while the months are shifted sideways.
+            overflow: hidden;
+        }
+
+        .drs-cal-months {
+            animation: drs-slide-in 0.24s cubic-bezier(0.2, 0.7, 0.3, 1) backwards;
+            animation-delay: var(--drs-anim-delay);
+        }
+    }
+
+    // 2. Range picked: the start day pops, the band sweeps day by day to the end day,
+    // which pops in turn. --drs-fill-i / --drs-fill-step are set by calendarView.ts.
+    .drs-anim-fill .drs-day--in-range:not(.drs-day--preview) {
+        --drs-fill-delay: calc(var(--drs-fill-i, 0) * var(--drs-fill-step, 0ms) + var(--drs-anim-delay));
+
+        &::before {
+            transform-origin: left center;
+            // Each day grows over little more than the gap to the next one, linearly,
+            // so the band advances as one continuous stroke instead of dashes.
+            animation: drs-sweep linear backwards;
+            animation-duration: calc(var(--drs-fill-step, 0ms) * 2.5 + 30ms);
+            animation-delay: var(--drs-fill-delay);
+        }
+
+        &.drs-day--start .drs-day-num,
+        &.drs-day--end .drs-day-num {
+            animation: drs-pop 0.26s cubic-bezier(0.3, 1.5, 0.6, 1) backwards;
+            animation-delay: var(--drs-fill-delay);
+        }
+    }
+
+    // 3. Dates that changed slide in (sideways for ‹ ›, rising otherwise), briefly in
+    // the accent colour so the reader sees what the click did.
+    .drs-anim-dates {
+        .drs-stack-date--changed,
+        .drs-range-text,
+        .drs-dialog-dates {
+            animation: drs-date-in 0.4s ease-out backwards;
+            animation-delay: var(--drs-anim-delay);
+        }
+    }
+
+    // ⚡ fills up like a gauge when the default period comes back, drains when left.
+    .drs-anim-bolt-fill .drs-quick-solid {
+        animation: drs-bolt-fill 0.55s cubic-bezier(0.4, 0, 0.2, 1) backwards;
+        animation-delay: var(--drs-anim-delay);
+    }
+
+    .drs-anim-bolt-empty .drs-quick-solid {
+        animation: drs-bolt-empty 0.4s ease-in backwards;
+        animation-delay: var(--drs-anim-delay);
+    }
+
+    // Menu opening: titles and periods rise in turn (capped, so long menus stay quick).
+    .drs-anim-menu {
+        .drs-menu-title,
+        .drs-menu-item {
+            animation: drs-rise 0.28s cubic-bezier(0.2, 0.7, 0.3, 1) backwards;
+            animation-delay: calc(min(var(--drs-i, 0), 14) * 18ms + var(--drs-anim-delay));
+        }
+    }
+
+    // 4. Landing page: logo pops, then each block rises in turn (--drs-i, set in
+    // visual.ts) and the feature ticks draw themselves.
+    .drs-anim-landing {
+        .drs-landing-logo {
+            animation: drs-pop 0.5s cubic-bezier(0.3, 1.5, 0.6, 1) backwards;
+            animation-delay: var(--drs-anim-delay);
+        }
+
+        .drs-landing-names,
+        .drs-landing-tagline,
+        .drs-landing-feature,
+        .drs-landing-start,
+        .drs-landing-link {
+            animation: drs-rise 0.42s cubic-bezier(0.2, 0.7, 0.3, 1) backwards;
+            animation-delay: calc(var(--drs-i, 0) * 75ms + var(--drs-anim-delay));
+        }
+
+        // The tick path is ~13.5 units long: a 14-unit dash hidden by its own offset.
+        .drs-landing-feature .drs-icon path {
+            stroke-dasharray: 14;
+            animation: drs-draw 0.35s ease-out backwards;
+            animation-delay: calc(var(--drs-i, 0) * 75ms + 180ms + var(--drs-anim-delay));
+        }
+    }
+}
+
+@keyframes drs-slide-in {
+    from {
+        opacity: 0;
+        transform: translateX(calc(var(--drs-anim-x) * 1.5em));
+    }
+}
+
+@keyframes drs-sweep {
+    from {
+        transform: translateY(-50%) scaleX(0);
+    }
+}
+
+@keyframes drs-pop {
+    from {
+        opacity: 0;
+        transform: scale(0.5);
+    }
+}
+
+// No "to" frame for the colour: it returns to the element's own colour (normal or muted).
+@keyframes drs-date-in {
+    0% {
+        opacity: 0;
+        transform: translate(calc(var(--drs-anim-x) * 0.7em), calc(var(--drs-anim-y) * 0.45em));
+        color: var(--drs-accent);
+    }
+
+    45% {
+        opacity: 1;
+        transform: none;
+        color: var(--drs-accent);
+    }
+}
+
+@keyframes drs-rise {
+    from {
+        opacity: 0;
+        transform: translateY(0.6em);
+    }
+}
+
+@keyframes drs-draw {
+    from {
+        stroke-dashoffset: 14;
+    }
+}
+
+@keyframes drs-bolt-fill {
+    from {
+        clip-path: inset(100% 0 0 0);
+    }
+}
+
+@keyframes drs-bolt-empty {
+    from {
+        clip-path: inset(0);
+    }
+}

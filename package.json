@@ -1,0 +1,30 @@
+{
+  "name": "date-range-slicer",
+  "description": "Timeframe – Power BI date range slicer with rolling presets and custom ranges",
+  "version": "1.0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "scripts": {
+    "pbiviz": "pbiviz",
+    "start": "pbiviz start",
+    "package": "pbiviz package",
+    "lint": "npx eslint .",
+    "eslint": "npx eslint . --ext .js,.jsx,.ts,.tsx",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test \"test/**/*.test.mts\"",
+    "test:tz": "node test/run-tz.mjs",
+    "test:browser": "node test/browser/run.mjs"
+  },
+  "dependencies": {
+    "powerbi-visuals-api": "5.11.2",
+    "powerbi-visuals-utils-formattingmodel": "7.1.0"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.8.0",
+    "eslint": "^9.11.1",
+    "eslint-plugin-powerbi-visuals": "^1.0.0",
+    "typescript": "5.5.4"
+  },
+  "overrides": {
+    "minimatch": "^11.0.1"
+  }
+}
